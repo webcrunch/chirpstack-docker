@@ -1,0 +1,123 @@
+name: Deploy
+
+# Brings ChirpStack on the server (/home/repos/chirpstack-docker) in line with this repo.
+# By hand for now (Actions -> Deploy -> Run workflow, branch production).
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: chirpstack-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DEPLOY_DIR: /home/repos/chirpstack-docker
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check before deploying
+        run: |
+          API_SECRET=ci docker compose -f docker-compose.yml config -q
+          bash scripts/check-ports.sh docker-compose.yml
+
+      - name: Import secrets from Vault
+        uses: hashicorp/vault-action@v3
+        with:
+          url: https://vault.jarllindquist.com
+          method: approle
+          roleId: ${{ secrets.VAULT_ROLE_ID }}
+          secretId: ${{ secrets.VAULT_SECRET_ID }}
+          secrets: |
+            kv/data/server-deploy SSH_HOST | SERVER_HOST ;
+            kv/data/server-deploy SSH_USERNAME | SERVER_USER ;
+            kv/data/server-deploy SERVER_PORT | SERVER_PORT ;
+            kv/data/server-deploy SSH_PRIVATE_KEY | SERVER_PRIVATE_KEY ;
+            kv/data/server-deploy SSH_HOST_FINGERPRINT | SSH_HOST_FINGERPRINT ;
+            kv/data/chirpstack API_SECRET | API_SECRET
+
+      # Files land in .incoming first; the running ones are kept in .previous to roll back to.
+      # The appleboy actions are pinned to a commit and check the server's fingerprint from Vault.
+      - name: Copy the files to the server
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ env.SERVER_HOST }}
+          username: ${{ env.SERVER_USER }}
+          key: ${{ env.SERVER_PRIVATE_KEY }}
+          port: ${{ env.SERVER_PORT }}
+          fingerprint: ${{ env.SSH_HOST_FINGERPRINT }}
+          source: docker-compose.yml,configuration/chirpstack/chirpstack.toml
+          target: ${{ env.DEPLOY_DIR }}/.incoming
+          rm: true
+
+      - name: Start on the server
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ env.SERVER_HOST }}
+          username: ${{ env.SERVER_USER }}
+          key: ${{ env.SERVER_PRIVATE_KEY }}
+          port: ${{ env.SERVER_PORT }}
+          fingerprint: ${{ env.SSH_HOST_FINGERPRINT }}
+          envs: DEPLOY_DIR,API_SECRET
+          script: |
+            set -eu
+            cd "$DEPLOY_DIR"
+            FILES="docker-compose.yml configuration/chirpstack/chirpstack.toml"
+
+            # The UI answers and all 8 containers run, within 2 minutes
+            healthy() {
+              for i in $(seq 1 40); do
+                code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8000/ || true)
+                running=$(docker compose ps --status running -q | wc -l)
+                if [ "$code" = "200" ] && [ "$running" -eq 8 ]; then return 0; fi
+                sleep 3
+              done
+              return 1
+            }
+
+            mkdir -p .previous/configuration/chirpstack
+            for f in $FILES; do cp -p "$f" ".previous/$f"; done
+            had_env=no
+            if [ -f .env ]; then cp -p .env .previous/.env; had_env=yes; fi
+
+            # The secret goes into .env, readable by root only, and is never printed
+            umask 077
+            printf 'API_SECRET=%s\n' "$API_SECRET" > .env.new && mv .env.new .env
+            umask 022
+
+            for f in $FILES; do cp ".incoming/$f" "$f"; done
+            docker compose config -q
+            docker compose up -d
+            # ChirpStack reads chirpstack.toml only when it starts
+            docker compose restart chirpstack
+
+            if healthy; then
+              docker compose ps
+              docker compose images
+              echo "ChirpStack is up"
+            else
+              echo "Not healthy after the deploy: rolling back to the previous files"
+              docker compose ps
+              docker compose logs --tail 30 chirpstack || true
+              for f in $FILES; do cp -p ".previous/$f" "$f"; done
+              if [ "$had_env" = yes ]; then cp -p .previous/.env .env; else rm -f .env; fi
+              docker compose up -d
+              docker compose restart chirpstack
+              exit 1
+            fi
+
+      # From outside (this runner): only the gateways' ports may answer.
+      - name: Check that only the gateway ports are public
+        run: |
+          open=0
+          for p in 8000 8090 8086; do
+            if curl -s -m 5 -o /dev/null "http://$SERVER_HOST:$p/"; then echo "Port $p answers from the internet"; open=1; else echo "Port $p: closed"; fi
+          done
+          if timeout 5 bash -c "exec 3<>/dev/tcp/$SERVER_HOST/1883" 2>/dev/null; then echo "Port 1883 (MQTT) is open"; open=1; else echo "Port 1883: closed"; fi
+          if curl -s -m 5 -o /dev/null "http://$SERVER_HOST:3001/"; then echo "Port 3001 (Basic Station): open, as it should be"; else echo "Port 3001 does not answer: the gateways can't reach Basic Station"; open=1; fi
+          exit $open

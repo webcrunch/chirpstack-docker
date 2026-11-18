@@ -1,8 +1,19 @@
-version: "3"
+# ChirpStack as it runs on the server (/home/repos/chirpstack-docker), deployed by
+# .github/workflows/deploy.yml. Based on chirpstack-docker at 50159c0 (January 2024), the commit the
+# server was cloned from; moving to a newer upstream is its own step.
+#
+# Only the gateways' ports are open to the internet: 1700/udp (Semtech packet forwarder) and 3001
+# (Basic Station). Everything else is bound to 127.0.0.1, because Docker's published ports go around
+# the host firewall (ufw). CI (scripts/check-ports.sh) refuses any other public port.
+#   UI and API:  ssh -L 8000:127.0.0.1:8000 user@server, then http://localhost:8000
+#
+# API_SECRET signs every login and API token. It comes from Vault (kv/chirpstack) and the deploy
+# writes it to .env on the server (readable by root only); compose refuses to start without it.
 
 services:
   chirpstack:
-    image: chirpstack/chirpstack:4
+    # Pinned to the version running on the server; upgrade by changing the tag
+    image: chirpstack/chirpstack:4.10.1
     command: -c /etc/chirpstack
     restart: unless-stopped
     volumes:
@@ -16,14 +27,19 @@ services:
       - MQTT_BROKER_HOST=mosquitto
       - REDIS_HOST=redis
       - POSTGRESQL_HOST=postgres
+      - API_SECRET=${API_SECRET:?API_SECRET is missing; the deploy writes it to .env from Vault}
     ports:
-      - 8080:8080
+      - "127.0.0.1:8000:8080"
+    networks:
+      - chirpstack
 
   chirpstack-gateway-bridge:
     image: chirpstack/chirpstack-gateway-bridge:4
     restart: unless-stopped
     ports:
-      - 1700:1700/udp
+      - "1700:1700/udp"
+    networks:
+      - chirpstack
     volumes:
       - ./configuration/chirpstack-gateway-bridge:/etc/chirpstack-gateway-bridge
     environment:
@@ -32,13 +48,15 @@ services:
       - INTEGRATION__MQTT__COMMAND_TOPIC_TEMPLATE=eu868/gateway/{{ .GatewayID }}/command/#
     depends_on:
       - mosquitto
-  
+
   chirpstack-gateway-bridge-basicstation:
     image: chirpstack/chirpstack-gateway-bridge:4
     restart: unless-stopped
     command: -c /etc/chirpstack-gateway-bridge/chirpstack-gateway-bridge-basicstation-eu868.toml
+    networks:
+      - chirpstack
     ports:
-      - 3001:3001
+      - "3001:3001"
     volumes:
       - ./configuration/chirpstack-gateway-bridge:/etc/chirpstack-gateway-bridge
     depends_on:
@@ -49,34 +67,61 @@ services:
     restart: unless-stopped
     command: --server chirpstack:8080 --bind 0.0.0.0:8090 --insecure
     ports:
-      - 8090:8090
+      - "127.0.0.1:8090:8090"
+    networks:
+      - chirpstack
     depends_on:
       - chirpstack
 
   postgres:
     image: postgres:14-alpine
     restart: unless-stopped
+    networks:
+      - chirpstack
     volumes:
       - ./configuration/postgresql/initdb:/docker-entrypoint-initdb.d
       - postgresqldata:/var/lib/postgresql/data
     environment:
+      # Only used when the database is first created; reachable on the internal network only
       - POSTGRES_PASSWORD=root
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    networks:
+      - chirpstack
     command: redis-server --save 300 1 --save 60 100 --appendonly no
     volumes:
       - redisdata:/data
 
+  # MQTT: the gateway bridges and ChirpStack talk here. It accepts anonymous clients, so it must
+  # never be public (anyone could read every device's data and send downlinks).
   mosquitto:
     image: eclipse-mosquitto:2
+    networks:
+      - chirpstack
     restart: unless-stopped
     ports:
-      - 1883:1883
-    volumes: 
+      - "127.0.0.1:1883:1883"
+    volumes:
       - ./configuration/mosquitto/config/:/mosquitto/config/
+
+  # InfluxDB 2 (its users and tokens are set up in its own UI; the INFLUXDB_* variables of
+  # InfluxDB 1.x that stood here did nothing)
+  influxdb:
+    image: influxdb:2.7.3
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8086:8086"
+    networks:
+      - chirpstack
+    volumes:
+      - "/data/docker-volumes/influxdb/data:/var/lib/influxdb2"
 
 volumes:
   postgresqldata:
   redisdata:
+
+networks:
+  chirpstack:
+    driver: bridge
