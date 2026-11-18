@@ -1,0 +1,50 @@
+name: CI
+
+# Checks ChirpStack's setup before anything reaches the server: the compose file is valid, only
+# the gateways' ports are public, and the API secret comes from Vault, never from the repo.
+on:
+  pull_request:
+  push:
+    branches: [production]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compose file is valid
+        run: API_SECRET=ci docker compose -f docker-compose.yml config -q
+
+      - name: Only the gateways' ports are public
+        run: bash scripts/check-ports.sh docker-compose.yml
+
+      - name: The port check rejects a public MQTT port
+        run: |
+          if bash scripts/check-ports.sh tests/public-port.yml; then
+            echo "check-ports.sh accepted tests/public-port.yml, which publishes MQTT to everyone"
+            exit 1
+          fi
+          echo "check-ports.sh rejected the public MQTT port, as it should"
+
+      # The secret that signs every login and API token: from Vault through .env, never in git
+      - name: The API secret is not in the repo
+        run: |
+          toml=configuration/chirpstack/chirpstack.toml
+          if grep -rn 'you-must-replace-this' --include='*.toml' configuration; then
+            echo "The template's public secret is back"; exit 1
+          fi
+          line=$(grep -E '^\s*secret\s*=' "$toml")
+          echo "$toml: $line"
+          [ "$(echo "$line" | tr -d ' ')" = 'secret="$API_SECRET"' ] || { echo 'expected secret="$API_SECRET"'; exit 1; }
+
+      - name: Compose refuses to start without the secret
+        run: |
+          if env -u API_SECRET docker compose -f docker-compose.yml config -q 2>err.txt; then
+            echo "compose accepted a missing API_SECRET: ChirpStack would start with a literal \$API_SECRET"; exit 1
+          fi
+          cat err.txt

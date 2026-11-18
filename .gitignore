@@ -5,3 +5,12 @@
 # data folder
 /data
 /lorawan-devices
+
+# Kept in git although hidden
+!.github/
+!.gitignore
+
+# Written by the deploy on the server
+.env
+.incoming/
+.previous/
