@@ -4,8 +4,9 @@
 # Usage: scripts/check-ports.sh [compose file]   (default docker-compose.yml)
 set -euo pipefail
 file="${1:-docker-compose.yml}"
-# The only ports the internet may reach: the gateways (Semtech UDP, Basic Station)
-ALLOWED="1700/udp 3001/tcp"
+# The only port the internet may reach: the gateway (Semtech UDP). Basic Station (3001) is closed
+# since 2026-11-20, as no gateway uses it.
+ALLOWED="1700/udp"
 bad=$(API_SECRET=ci docker compose -f "$file" config --format json \
   | jq -r --arg allowed "$ALLOWED" '
       ($allowed | split(" ")) as $ok
