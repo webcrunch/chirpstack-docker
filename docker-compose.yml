@@ -2,9 +2,10 @@
 # .github/workflows/deploy.yml. Based on chirpstack-docker at 50159c0 (January 2024), the commit the
 # server was cloned from; moving to a newer upstream is its own step.
 #
-# Only the gateways' ports are open to the internet: 1700/udp (Semtech packet forwarder) and 3001
-# (Basic Station). Everything else is bound to 127.0.0.1, because Docker's published ports go around
-# the host firewall (ufw). CI (scripts/check-ports.sh) refuses any other public port.
+# Only the gateway's port is open to the internet: 1700/udp (Semtech packet forwarder, what the
+# gateway uses). Everything else is bound to 127.0.0.1, because Docker's published ports go around
+# the host firewall (ufw); that includes 3001 (Basic Station), which no gateway here uses: to use
+# one, open it again here and in scripts/check-ports.sh. CI refuses any other public port.
 #   UI and API:  ssh -L 8000:127.0.0.1:8000 user@server, then http://localhost:8000
 #
 # API_SECRET signs every login and API token. It comes from Vault (kv/chirpstack) and the deploy
@@ -56,7 +57,7 @@ services:
     networks:
       - chirpstack
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3001" # no Basic Station gateway uses it; closed to the internet (2026-11-20)
     volumes:
       - ./configuration/chirpstack-gateway-bridge:/etc/chirpstack-gateway-bridge
     depends_on:
