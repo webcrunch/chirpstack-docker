@@ -107,7 +107,12 @@ services:
       - ./configuration/mosquitto/config/:/mosquitto/config/
 
   # InfluxDB 2 (its users and tokens are set up in its own UI; the INFLUXDB_* variables of
-  # InfluxDB 1.x that stood here did nothing)
+  # InfluxDB 1.x that stood here did nothing).
+  # ChirpStack writes the sensor data here through the application's InfluxDB integration. Its
+  # endpoint lives in ChirpStack's database (table application_integration), not in a file, and must
+  # be the internal address http://influxdb:8086/api/v2/write. Until 2026-11-19 it was the server's
+  # public IP on 8086; closing that port stopped every write for ~20 h. Check it with:
+  #   docker compose exec -T postgres psql -U chirpstack -d chirpstack -tc   #     "select configuration #>> '{InfluxDb,endpoint}' from application_integration where kind = 'InfluxDb';"
   influxdb:
     image: influxdb:2.7.3
     restart: unless-stopped
