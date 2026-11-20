@@ -112,12 +112,12 @@ jobs:
             fi
 
       # From outside (this runner): only the gateways' ports may answer.
-      - name: Check that only the gateway ports are public
+      - name: Check that only the gateway port is public
         run: |
           open=0
-          for p in 8000 8090 8086; do
+          # 3001 (Basic Station) is closed since 2026-11-20: no gateway uses it, only scanners did
+          for p in 8000 8090 8086 3001; do
             if curl -s -m 5 -o /dev/null "http://$SERVER_HOST:$p/"; then echo "Port $p answers from the internet"; open=1; else echo "Port $p: closed"; fi
           done
           if timeout 5 bash -c "exec 3<>/dev/tcp/$SERVER_HOST/1883" 2>/dev/null; then echo "Port 1883 (MQTT) is open"; open=1; else echo "Port 1883: closed"; fi
-          if curl -s -m 5 -o /dev/null "http://$SERVER_HOST:3001/"; then echo "Port 3001 (Basic Station): open, as it should be"; else echo "Port 3001 does not answer: the gateways can't reach Basic Station"; open=1; fi
           exit $open
